@@ -327,8 +327,11 @@ class CamTile extends StatefulWidget {
 class _CamTileState extends State<CamTile> {
   late final Player player = Player();
   late final VideoController controller = VideoController(player);
-  StreamSubscription<int?>? sub;
+  final List<StreamSubscription> subs = [];
   bool hasVideo = false;
+  String message = 'Đang kết nối...';
+
+  String get safeUrl => widget.url.replaceFirst(RegExp(r':[^:@/]*@'), ':****@');
 
   @override
   void initState() {
@@ -340,16 +343,36 @@ class _CamTileState extends State<CamTile> {
     try {
       await (player.platform as dynamic).setProperty('rtsp-transport', 'tcp');
     } catch (_) {}
-    sub = player.stream.width.listen((w) {
-      if (mounted) setState(() => hasVideo = (w ?? 0) > 0);
-    });
+
+    subs.add(player.stream.width.listen((w) {
+      if (!mounted) return;
+      setState(() {
+        hasVideo = (w ?? 0) > 0;
+        if (hasVideo) message = '';
+      });
+    }));
+    subs.add(player.stream.error.listen((e) {
+      if (mounted) setState(() => message = 'Lỗi: $e');
+    }));
+    subs.add(player.stream.log.listen((l) {
+      if (!mounted || hasVideo) return;
+      if (l.level == 'error' || l.level == 'fatal' || l.level == 'warn') {
+        setState(() => message = l.text.trim());
+      }
+    }));
+    subs.add(player.stream.buffering.listen((b) {
+      if (mounted && b && !hasVideo) setState(() => message = 'Đang tải hình...');
+    }));
+
     await player.setVolume(0);
     await player.open(Media(widget.url));
   }
 
   @override
   void dispose() {
-    sub?.cancel();
+    for (final s in subs) {
+      s.cancel();
+    }
     player.dispose();
     super.dispose();
   }
@@ -361,17 +384,41 @@ class _CamTileState extends State<CamTile> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          Container(
-            color: Colors.black87,
-            child: const Center(
-              child: Icon(Icons.videocam, size: 40, color: Colors.white24),
-            ),
+          Container(color: Colors.black),
+          Video(
+            controller: controller,
+            controls: NoVideoControls,
+            fit: BoxFit.cover,
           ),
-          if (hasVideo)
-            Video(
-              controller: controller,
-              controls: NoVideoControls,
-              fit: BoxFit.cover,
+          if (!hasVideo)
+            IgnorePointer(
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.videocam, size: 36, color: Colors.white24),
+                      const SizedBox(height: 6),
+                      Text(
+                        message,
+                        textAlign: TextAlign.center,
+                        maxLines: 4,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 11, color: Colors.orangeAccent),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        safeUrl,
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 9, color: Colors.white38),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ),
           Positioned(
             left: 4,
