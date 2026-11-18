@@ -15,16 +15,33 @@ enum Brand { hikvision, dahua }
 
 String brandName(Brand b) => b == Brand.hikvision ? 'Hikvision' : 'Dahua';
 
-String rtspUrl(Brand b, String user, String pass, String ip,
+List<String> rtspUrls(Brand b, String user, String pass, String ip,
     {required bool mainStream}) {
   final u = Uri.encodeComponent(user);
   final p = Uri.encodeComponent(pass);
+  final base = 'rtsp://$u:$p@$ip:554';
   if (b == Brand.hikvision) {
-    final ch = mainStream ? 101 : 102;
-    return 'rtsp://$u:$p@$ip:554/Streaming/Channels/$ch';
+    return mainStream
+        ? [
+            '$base/Streaming/Channels/101',
+            '$base/h264/ch1/main/av_stream',
+            '$base/Streaming/Channels/102',
+          ]
+        : [
+            '$base/Streaming/Channels/102',
+            '$base/Streaming/Channels/101',
+            '$base/h264/ch1/sub/av_stream',
+          ];
   }
-  final sub = mainStream ? 0 : 1;
-  return 'rtsp://$u:$p@$ip:554/cam/realmonitor?channel=1&subtype=$sub';
+  return mainStream
+      ? [
+          '$base/cam/realmonitor?channel=1&subtype=0',
+          '$base/cam/realmonitor?channel=1&subtype=1',
+        ]
+      : [
+          '$base/cam/realmonitor?channel=1&subtype=1',
+          '$base/cam/realmonitor?channel=1&subtype=0',
+        ];
 }
 
 class CameraApp extends StatelessWidget {
@@ -162,7 +179,19 @@ class _SetupPageState extends State<SetupPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Xem Camera RTSP')),
+      appBar: AppBar(
+        toolbarHeight: 64,
+        title: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Xem Camera RTSP'),
+            Text(
+              'Công ty TNHH TM-DV Dương Thái Hà',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.normal),
+            ),
+          ],
+        ),
+      ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -247,6 +276,13 @@ class _SetupPageState extends State<SetupPage> {
               label: Text('Xem ${found.length} camera dạng lưới'),
             ),
           ],
+          const SizedBox(height: 32),
+          const Center(
+            child: Text(
+              'Design by Hiết',
+              style: TextStyle(fontSize: 12, color: Colors.white54),
+            ),
+          ),
         ],
       ),
     );
@@ -270,7 +306,19 @@ class GridPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('${ips.length} camera')),
+      appBar: AppBar(
+        toolbarHeight: 64,
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('${ips.length} camera'),
+            const Text(
+              'Công ty TNHH TM-DV Dương Thái Hà',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.normal),
+            ),
+          ],
+        ),
+      ),
       body: GridView.builder(
         // cacheExtent = 0: ô nào cuộn ra khỏi màn hình sẽ bị hủy, ô cuộn tới mới chạy video
         cacheExtent: 0,
@@ -295,7 +343,7 @@ class GridPage extends StatelessWidget {
                       aspectRatio: 16 / 9,
                       child: CamTile(
                         ip: ip,
-                        url: rtspUrl(brand, user, pass, ip, mainStream: true),
+                        urls: rtspUrls(brand, user, pass, ip, mainStream: true),
                       ),
                     ),
                   ),
@@ -305,7 +353,7 @@ class GridPage extends StatelessWidget {
             child: CamTile(
               key: ValueKey(ip),
               ip: ip,
-              url: rtspUrl(brand, user, pass, ip, mainStream: false),
+              urls: rtspUrls(brand, user, pass, ip, mainStream: false),
             ),
           );
         },
@@ -316,9 +364,9 @@ class GridPage extends StatelessWidget {
 
 class CamTile extends StatefulWidget {
   final String ip;
-  final String url;
+  final List<String> urls;
 
-  const CamTile({super.key, required this.ip, required this.url});
+  const CamTile({super.key, required this.ip, required this.urls});
 
   @override
   State<CamTile> createState() => _CamTileState();
@@ -328,10 +376,15 @@ class _CamTileState extends State<CamTile> {
   late final Player player = Player();
   late final VideoController controller = VideoController(player);
   final List<StreamSubscription> subs = [];
+  Timer? timer;
+  int idx = 0;
   bool hasVideo = false;
+  bool finished = false;
   String message = 'Đang kết nối...';
+  String lastErr = '';
+  DateTime openedAt = DateTime.now();
 
-  String get safeUrl => widget.url.replaceFirst(RegExp(r':[^:@/]*@'), ':****@');
+  String get currentUrl => widget.urls[idx].replaceFirst(RegExp(r':[^:@/]*@'), ':****@');
 
   @override
   void initState() {
@@ -346,30 +399,59 @@ class _CamTileState extends State<CamTile> {
 
     subs.add(player.stream.width.listen((w) {
       if (!mounted) return;
-      setState(() {
-        hasVideo = (w ?? 0) > 0;
-        if (hasVideo) message = '';
-      });
-    }));
-    subs.add(player.stream.error.listen((e) {
-      if (mounted) setState(() => message = 'Lỗi: $e');
-    }));
-    subs.add(player.stream.log.listen((l) {
-      if (!mounted || hasVideo) return;
-      if (l.level == 'error' || l.level == 'fatal' || l.level == 'warn') {
-        setState(() => message = l.text.trim());
+      if ((w ?? 0) > 0) {
+        timer?.cancel();
+        setState(() {
+          hasVideo = true;
+          message = '';
+        });
       }
     }));
-    subs.add(player.stream.buffering.listen((b) {
-      if (mounted && b && !hasVideo) setState(() => message = 'Đang tải hình...');
+    subs.add(player.stream.error.listen((e) {
+      lastErr = e.toString();
+      // bỏ qua lỗi dồn dập ngay sau khi vừa mở
+      if (DateTime.now().difference(openedAt).inMilliseconds < 1500) return;
+      _fail();
+    }));
+    subs.add(player.stream.log.listen((l) {
+      if (hasVideo) return;
+      if (l.level == 'error' || l.level == 'fatal' || l.level == 'warn') {
+        lastErr = l.text.trim();
+      }
     }));
 
     await player.setVolume(0);
-    await player.open(Media(widget.url));
+    await _open();
+  }
+
+  Future<void> _open() async {
+    timer?.cancel();
+    if (!mounted) return;
+    setState(() {
+      message = 'Đang kết nối (${idx + 1}/${widget.urls.length})...';
+    });
+    openedAt = DateTime.now();
+    await player.open(Media(widget.urls[idx]));
+    timer = Timer(const Duration(seconds: 10), _fail);
+  }
+
+  void _fail() {
+    timer?.cancel();
+    if (!mounted || hasVideo || finished) return;
+    if (idx + 1 < widget.urls.length) {
+      idx++;
+      _open();
+    } else {
+      finished = true;
+      setState(() {
+        message = 'Không lên hình sau ${widget.urls.length} đường dẫn. Lỗi: $lastErr';
+      });
+    }
   }
 
   @override
   void dispose() {
+    timer?.cancel();
     for (final s in subs) {
       s.cancel();
     }
@@ -403,13 +485,13 @@ class _CamTileState extends State<CamTile> {
                       Text(
                         message,
                         textAlign: TextAlign.center,
-                        maxLines: 4,
+                        maxLines: 5,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(fontSize: 11, color: Colors.orangeAccent),
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        safeUrl,
+                        currentUrl,
                         textAlign: TextAlign.center,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
