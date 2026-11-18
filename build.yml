@@ -1,0 +1,46 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Tao khung project Android
+        run: flutter create --platforms=android --project-name camera_grid app
+
+      - name: Chep code vao project
+        run: |
+          rm -rf app/lib
+          cp -r lib app/lib
+          cp pubspec.yaml app/pubspec.yaml
+          rm -rf app/test
+
+      - name: Them quyen mang
+        run: |
+          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>\n    <application android:usesCleartextTraffic="true"#' app/android/app/src/main/AndroidManifest.xml
+
+      - name: Build APK
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter build apk --release --split-per-abi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: camera-apk
+          path: app/build/app/outputs/flutter-apk/*.apk
